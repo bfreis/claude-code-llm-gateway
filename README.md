@@ -1,5 +1,9 @@
 # ccgw — a local LLM gateway for Claude Code
 
+[![CI](https://github.com/bfreis/claude-code-llm-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/bfreis/claude-code-llm-gateway/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/go-1.27-00ADD8?logo=go&logoColor=white)](go.mod)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 A small Go server that sits on loopback, speaks the Anthropic Messages API, and
 routes each request by model ID:
 
