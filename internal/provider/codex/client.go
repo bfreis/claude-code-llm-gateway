@@ -111,7 +111,7 @@ func (c *Client) Messages(w http.ResponseWriter, r *http.Request, req *anthropic
 	}
 
 	sw := anthropic.NewStreamWriter(w)
-	tr := NewStreamTranslator(sw, displayModel, c.stream)
+	tr := NewStreamTranslator(sw, displayModel, c.stream, anthropic.EstimateInputTokens(req))
 	_ = tr.Run(resp.Body)
 }
 

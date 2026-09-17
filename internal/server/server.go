@@ -326,42 +326,7 @@ func textBytes(raw []byte) int {
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return 0
 	}
-	total := blockBytes(req.System)
-	for _, m := range req.Messages {
-		total += blockBytes(m.Content)
-	}
-	for _, t := range req.Tools {
-		total += len(t.Name) + len(t.Description) + len(t.InputSchema)
-	}
-	return total
-}
-
-// blockBytes counts the text in a string-or-blocks content field.
-func blockBytes(raw json.RawMessage) int {
-	blocks, err := anthropic.DecodeContent(raw)
-	if err != nil {
-		return len(raw)
-	}
-	var total int
-	for _, b := range blocks {
-		switch b.Type {
-		case anthropic.BlockText:
-			total += len(b.Text)
-		case anthropic.BlockThinking:
-			total += len(b.Thinking)
-		case anthropic.BlockToolUse:
-			total += len(b.Name) + len(b.Input)
-		case anthropic.BlockToolResult:
-			total += blockBytes(b.Content)
-		case anthropic.BlockImage, anthropic.BlockDocument:
-			// Base64 payloads are not text and would swamp the estimate; they
-			// are billed by dimensions, which the gateway cannot see.
-			if b.Source != nil {
-				total += len(b.Source.URL)
-			}
-		}
-	}
-	return total
+	return anthropic.TextBytes(&req)
 }
 
 // peekModel pulls just the model field out of a request body.

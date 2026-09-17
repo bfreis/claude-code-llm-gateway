@@ -44,15 +44,21 @@ type StreamTranslator struct {
 	usage        anthropic.Usage
 	stopReason   string
 	sawToolCalls bool
+
+	// estimatedInputTokens seeds message_start's usage so Claude Code's
+	// context display does not flash to zero before the real count arrives
+	// in message_delta. See anthropic.EstimateInputTokens.
+	estimatedInputTokens int
 }
 
 // NewStreamTranslator prepares a translator writing to out.
-func NewStreamTranslator(out *anthropic.StreamWriter, modelID string, opt Options) *StreamTranslator {
+func NewStreamTranslator(out *anthropic.StreamWriter, modelID string, opt Options, estimatedInputTokens int) *StreamTranslator {
 	return &StreamTranslator{
-		out:       out,
-		modelID:   modelID,
-		opt:       opt,
-		toolBlock: map[int]int{},
+		out:                  out,
+		modelID:              modelID,
+		opt:                  opt,
+		toolBlock:            map[int]int{},
+		estimatedInputTokens: estimatedInputTokens,
 	}
 }
 
@@ -230,7 +236,7 @@ func (t *StreamTranslator) ensureStarted() error {
 			Role:    anthropic.RoleAssistant,
 			Model:   t.modelID,
 			Content: []anthropic.ContentBlock{},
-			Usage:   anthropic.Usage{},
+			Usage:   anthropic.Usage{InputTokens: t.estimatedInputTokens},
 		},
 	})
 }

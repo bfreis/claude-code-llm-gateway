@@ -88,7 +88,7 @@ func (c *Client) Messages(w http.ResponseWriter, r *http.Request, req *anthropic
 	}
 
 	if req.Stream {
-		c.stream(w, resp, displayModel)
+		c.stream(w, resp, displayModel, anthropic.EstimateInputTokens(req))
 		return
 	}
 	c.complete(w, resp, displayModel)
@@ -101,7 +101,7 @@ func acceptFor(stream bool) string {
 	return "application/json"
 }
 
-func (c *Client) stream(w http.ResponseWriter, resp *http.Response, displayModel string) {
+func (c *Client) stream(w http.ResponseWriter, resp *http.Response, displayModel string, estimatedInputTokens int) {
 	sw := anthropic.NewStreamWriter(w)
 
 	// A model that reasons for minutes before its first token would otherwise
@@ -120,7 +120,7 @@ func (c *Client) stream(w http.ResponseWriter, resp *http.Response, displayModel
 		<-done
 	}()
 
-	tr := NewStreamTranslator(sw, displayModel, c.opt)
+	tr := NewStreamTranslator(sw, displayModel, c.opt, estimatedInputTokens)
 	_ = tr.Run(resp.Body)
 }
 

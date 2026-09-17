@@ -29,7 +29,7 @@ func runStream(t *testing.T, body string, opt StreamOptions) []frame {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	sw := anthropic.NewStreamWriter(rec)
-	tr := NewStreamTranslator(sw, "anthropic/gpt-5.6-sol", opt)
+	tr := NewStreamTranslator(sw, "anthropic/gpt-5.6-sol", opt, 0)
 	if err := tr.Run(strings.NewReader(body)); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -51,6 +51,43 @@ func runStream(t *testing.T, body string, opt StreamOptions) []frame {
 		out = append(out, frame{name: f.Name, data: m})
 	}
 	return out
+}
+
+func TestStreamMessageStartCarriesTheEstimate(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw := anthropic.NewStreamWriter(rec)
+	tr := NewStreamTranslator(sw, "anthropic/gpt-5.6-sol", StreamOptions{}, 4242)
+	body := sse(t, map[string]any{"type": EvOutputTextDelta, "delta": "Hi"}) +
+		sse(t, map[string]any{"type": EvCompleted, "response": map[string]any{"usage": nil}})
+	if err := tr.Run(strings.NewReader(body)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var out []frame
+	r := anthropic.NewReader(rec.Body)
+	for {
+		f, err := r.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("reading translated stream: %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(f.Data), &m); err != nil {
+			t.Fatalf("decoding %q: %v", f.Data, err)
+		}
+		out = append(out, frame{name: f.Name, data: m})
+	}
+	if len(out) == 0 || out[0].name != anthropic.EvMessageStart {
+		t.Fatalf("expected message_start first, got %v", names(out))
+	}
+	// Codex only learns real usage once its stream completes, so message_start
+	// would otherwise report zero — which Claude Code renders as context usage
+	// flashing to zero every turn. See anthropic.EstimateInputTokens.
+	usage := out[0].data["message"].(map[string]any)["usage"].(map[string]any)
+	if got := usage["input_tokens"]; got != float64(4242) {
+		t.Errorf("message_start input_tokens = %v, want 4242 (the seeded estimate, not zero)", got)
+	}
 }
 
 func TestStreamFinalUsage(t *testing.T) {
