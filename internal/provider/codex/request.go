@@ -191,6 +191,11 @@ func assistantItems(blocks []anthropic.ContentBlock) []Item {
 					Type:             ItemReasoning,
 					ID:               id,
 					EncryptedContent: encrypted,
+					// The summary is carried in the thinking text Claude Code
+					// already displayed; what the backend needs back is the
+					// encrypted blob. The field is still required, so send it
+					// empty rather than leaving it out.
+					Summary: &[]Part{},
 				})
 			}
 		case anthropic.BlockRedactedThinking:

@@ -40,6 +40,13 @@ type Config struct {
 	// AliasPrefix is prepended to non-Anthropic model IDs so that Claude
 	// Code's discovery filter accepts them. Set to "" to disable.
 	AliasPrefix *string `yaml:"alias_prefix"`
+	// EnableToolSearch exports ENABLE_TOOL_SEARCH from 'ccgw env'.
+	//
+	// Claude Code turns tool search off whenever ANTHROPIC_BASE_URL is not one
+	// of Anthropic's own hosts, because it cannot know whether the proxy
+	// forwards tool_reference blocks — and then inlines every MCP tool schema
+	// instead of loading them on demand. Unset means on; see ToolSearchEnabled.
+	EnableToolSearch *bool `yaml:"enable_tool_search"`
 	// Anthropic configures the default passthrough route.
 	Anthropic AnthropicConfig `yaml:"anthropic"`
 	// Providers are the non-Anthropic backends.
@@ -164,6 +171,14 @@ type Model struct {
 	Description string `yaml:"description"`
 	// MaxTokens caps max_tokens for this model when Claude Code asks for more.
 	MaxTokens int `yaml:"max_tokens"`
+	// ContextWindow is the model's real input context window, in tokens.
+	//
+	// Claude Code assumes 200k for an ID it does not recognise. Setting this
+	// makes 'ccgw env' export the variable that corrects it — see
+	// WindowDirective, which picks between the two Claude Code honours. Leave
+	// it unset rather than guessing: an overstated window turns a graceful
+	// auto-compact into a hard refusal from the provider.
+	ContextWindow int `yaml:"context_window"`
 	// LongContext advertises the model with a [1m] suffix.
 	//
 	// Claude Code assumes a 200k window for a model it does not recognise; the
@@ -335,6 +350,9 @@ func (c *Config) validate() error {
 		}
 		if !seenProvider[m.Provider] {
 			return fmt.Errorf("model %q: references unknown provider %q", m.ID, m.Provider)
+		}
+		if m.ContextWindow < 0 {
+			return fmt.Errorf("model %q: context_window must not be negative", m.ID)
 		}
 	}
 	return nil

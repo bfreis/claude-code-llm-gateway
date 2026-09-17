@@ -42,6 +42,11 @@ which model its own `config.toml` names. On a machine where both CLIs already
 work, the only question is whether to write the file — and `-y` skips that too.
 If there is no ChatGPT sign-in, it offers to open a browser and do it.
 
+Re-running `setup` over an existing config needs `-force`, which keeps the
+previous file as `config.yaml.bak` — the wizard regenerates from detection, so
+anything hand-tuned would otherwise be lost. `-y` on its own refuses, because
+the default answer to "replace it?" is no.
+
 `ccgw init` still writes a commented starter config non-interactively.
 
 In another shell:
@@ -51,7 +56,8 @@ eval "$(./ccgw env)"              # fidelity mode; see the three modes below
 claude
 ```
 
-`./ccgw models` prints the catalogue and the IDs Claude Code will see.
+`./ccgw models` prints the catalogue, the IDs Claude Code will see, and the
+context window each model declares.
 After changing the model list, re-run `./ccgw sync-picker` and give Claude Code
 a full restart — the picker is read once, at startup.
 
@@ -252,15 +258,68 @@ models:
     display_name: GPT-5.6
     description: OpenAI GPT-5.6
     # max_tokens: 32000      # clamp the output cap for this model
+    # context_window: 400000 # the model's real input limit; see below
     # long_context: true     # advertise as gpt-5.6[1m]; see below
 ```
 
-`long_context` appends a `[1m]` suffix to the advertised ID. Claude Code assumes
-a 200k window for a model it does not recognise, and reads that suffix as a
-1M client-side window; the gateway strips it again before calling the provider.
-It is a claim you are making about the backend, not a request to it — only set
-it for a model that really accepts that much input, and consider an explicit
-`CLAUDE_CODE_AUTO_COMPACT_WINDOW` if the true limit is lower.
+### MCP tool schemas
+
+Claude Code loads MCP tool schemas on demand — putting only tool names in
+context and fetching a schema the first time it is needed — but it switches that
+off behind any `ANTHROPIC_BASE_URL` that is not one of Anthropic's own hosts,
+because it cannot know whether the proxy forwards `tool_reference` blocks. It
+then inlines every schema into every request instead. In a session with a few
+MCP servers that is the largest cost the gateway imposes: **191.9k of context
+versus 2.3k**, measured with `/context`.
+
+ccgw forwards those blocks — the Anthropic path is byte-exact — so `ccgw env`
+turns it back on:
+
+```
+export ENABLE_TOOL_SEARCH=true
+```
+
+`enable_tool_search: false` in the config stops that, and makes `ccgw env` clear
+the variable instead. Turn it off if a backend answers **400** to the request
+shape; that is the documented failure, and it is loud rather than quiet. If
+managed settings suppress tool search, exporting `ENABLE_TOOL_SEARCH=force`
+after the `eval` overrides them.
+
+### Context window
+
+Claude Code assumes **200k** for any model ID it does not recognise, which is
+every ID this gateway advertises. A model with a larger window is then compacted
+at a fraction of what it can hold. `context_window` fixes that: state the real
+number and `ccgw env` exports the variable Claude Code reads.
+
+```sh
+eval "$(ccgw env)"    # sets ANTHROPIC_BASE_URL and the window together
+```
+
+There are two such variables, and which one applies depends on `long_context`:
+
+| config | variable `ccgw env` exports | why |
+|---|---|---|
+| `context_window` alone | `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | takes any number, and Claude Code honours it only for IDs that do not begin with `claude-`, so proxied Claude models keep their own windows |
+| `context_window` + `long_context` | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | the `[1m]` suffix pins the cap at 1M *before* Claude Code reads `MAX_CONTEXT_TOKENS`, so that variable would be inert; this one lowers from the raised ceiling instead, expresses 100k–1M only, and is global — it caps 1M Claude sessions too |
+
+Prefer `context_window` on its own. Reach for `long_context` only when the
+backend really does accept 1M, or when you want the picker row to read as a
+1M model.
+
+Both variables are process-global, so a catalogue whose models declare different
+windows is held to the smallest; `ccgw env` says so and names what is being
+given up.
+
+**Measure rather than guess.** `context_window` is a claim about the backend,
+not a request to it. Overstate it and you trade a graceful auto-compact for a
+hard refusal partway through a session. `ccgw models` shows what each model
+declares, and `200k (assumed)` for any that declare nothing.
+
+Selecting a `long_context` model also makes Claude Code send
+`anthropic-beta: context-1m-2025-08-07`. The `codex` and `openai` paths build
+their own upstream request and never forward it; `anthropic-compatible` does
+forward it, so a backend that validates betas may reject it.
 
 Any model ID not listed under `models` falls through to Anthropic, so the Claude
 models never need enumerating.
@@ -436,16 +495,34 @@ models:
   - id: "gpt-6-astra"
     provider: codex
     display_name: "GPT-6 Astra (Codex)"
+    context_window: 920000
   - id: "gpt-5.6-sol"
     provider: codex
     display_name: "GPT-5.6 Sol (Codex)"
+    context_window: 920000
   - id: "gpt-5.6-terra"
     provider: codex
     display_name: "GPT-5.6 Terra (Codex)"
+    context_window: 920000
   - id: "gpt-5.6-luna"
     provider: codex
     display_name: "GPT-5.6 Luna (Codex)"
+    context_window: 920000
 ```
+
+`context_window` is what stops Claude Code auto-compacting these at the 200k it
+assumes for an unrecognised ID — see [Context window](#context-window). 920,000
+is measured, not advertised by the provider: bisecting the endpoint in September
+2026 put the limit between roughly 920k accepted and 935k refused, and the
+configured value is the accepted figure rounded down. It is a property of the
+backend at a point in time, so re-measure if long sessions start being refused.
+`ccgw setup -codex-window N` sets a different number, and `-codex-window 0`
+leaves it unstated.
+
+To re-measure, send a deliberately oversized request and bisect on the
+`context_length_exceeded` error. Note that the backend also caps each individual
+input text field at 10,485,760 bytes, so filler has to be split across several
+content blocks or that limit fires first and tells you nothing about the window.
 
 Whether your account serves all of them is between you and OpenAI: a model it
 does not serve is refused when selected, not when configured, so an extra row
@@ -534,11 +611,42 @@ provider type does no translation.
 
 ## Known limits
 
-- **Input context window.** Claude Code assumes 200k for a model it does not
-  recognise. A provider model with a smaller window will overflow before Claude
-  Code thinks to compact; one with a larger window is under-used unless you set
-  `long_context`. The lever is `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, which the
-  gateway does not set for you.
+- **Input context window is stated, not discovered.** `context_window` is a
+  number you supply and the gateway exports; nothing here asks the provider what
+  its limit is, because no endpoint reports it. A model configured with a window
+  larger than it really has will be refused mid-session rather than compacted.
+  The Codex default is measured (see [Context window](#context-window)); for any
+  other provider it is yours to measure. A model that declares nothing keeps
+  Claude Code's 200k assumption, which is safe but wasteful.
+- **The window is process-global.** Both variables Claude Code honours apply to
+  the whole session, so a catalogue of models with different windows is held to
+  the smallest. Separate sessions are the only way around it.
+- **Claude models lose their native 1M window behind the gateway.** Claude Code
+  downgrades a model whose catalogue entry declares 1M to the 200k it
+  *believes* whenever `ANTHROPIC_BASE_URL` is not one of Anthropic's own hosts —
+  which is always true here, and would be true of any proxy. Sonnet 5 reads as
+  200.0k through ccgw and 1.0M without it. Select the 1M variant to get it
+  back:
+
+  ```
+  /model sonnet[1m]        # or opus[1m], fable[1m], opusplan[1m]
+  ```
+
+  The suffix is checked before the fallback, so it holds behind any base URL.
+  The choice persists, and the alias resolves to whatever the current model is,
+  so nothing here needs updating when Anthropic ships a new one. `ccgw env`
+  prints this as a reminder. It affects Claude models only — provider models are
+  sized by `context_window`.
+
+  `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` also restores it, by making
+  Claude Code treat the base URL as first-party. Do not use it: the same
+  predicate gates gateway model discovery, so every provider row disappears
+  from the picker.
+- **Switching down mid-session strands the conversation.** The window is
+  per-model but the transcript is not. A session grown to 400k on a provider
+  model does not fit a 200k Claude model, and compaction cannot run there
+  either — it would have to send the whole conversation to the smaller model.
+  Compact *before* switching down, or switch back up, compact, and return.
 - **Tool schemas are forwarded as-is.** Some backends reject regex constructs
   that Claude Code's schemas contain — character-class shorthands of the
   `\p{...}` family are the ones seen in practice. ccgw neither checks for this

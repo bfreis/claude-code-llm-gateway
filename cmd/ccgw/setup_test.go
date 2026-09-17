@@ -299,3 +299,164 @@ func signedInCodexHome(t *testing.T) string {
 	}
 	return home
 }
+
+func TestCodexModelsCarryTheMeasuredWindow(t *testing.T) {
+	// Without it every Codex row sits at the 200k Claude Code assumes for an ID
+	// it does not recognise, so auto-compact fires at a fraction of the window
+	// the account actually serves.
+	cfg := renderedConfigLoads(t, answers{
+		listen: "127.0.0.1:8787", useCodex: true, codexWindow: codex.DefaultContextWindow,
+		codexVersion: "0.154.0", codexModels: codex.DefaultModelIDs(),
+	})
+	for _, m := range cfg.Models {
+		if m.ContextWindow != codex.DefaultContextWindow {
+			t.Errorf("%s context_window = %d, want %d", m.ID, m.ContextWindow, codex.DefaultContextWindow)
+		}
+		// The [1m] suffix would pin Claude Code at 1M and make the variable
+		// that carries the real number inert.
+		if m.LongContext {
+			t.Errorf("%s was advertised long_context, which overstates the window", m.ID)
+		}
+	}
+}
+
+func TestGeneratedConfigYieldsTheRightDirective(t *testing.T) {
+	// The config is only useful if it produces the export Claude Code reads.
+	cfg := renderedConfigLoads(t, answers{
+		listen: "127.0.0.1:8787", useCodex: true, codexWindow: codex.DefaultContextWindow,
+		codexVersion: "0.154.0", codexModels: codex.DefaultModelIDs(),
+	})
+	d, ok := cfg.WindowDirective()
+	if !ok {
+		t.Fatal("generated config produces no window directive")
+	}
+	if d.Name != config.EnvMaxContextTokens || d.Value != codex.DefaultContextWindow {
+		t.Errorf("directive = %s=%d", d.Name, d.Value)
+	}
+	if d.Mixed {
+		t.Error("a single-window catalogue was reported as mixed")
+	}
+}
+
+func TestWindowCanBeLeftUnstated(t *testing.T) {
+	// It is a claim about the backend, so it has to be possible to not make it.
+	cfg := renderedConfigLoads(t, answers{
+		listen: "127.0.0.1:8787", useCodex: true, codexWindow: 0,
+		codexVersion: "0.154.0", codexModels: codex.DefaultModelIDs(),
+	})
+	for _, m := range cfg.Models {
+		if m.ContextWindow != 0 {
+			t.Errorf("%s declares a window although none was asked for", m.ID)
+		}
+	}
+	if _, ok := cfg.WindowDirective(); ok {
+		t.Error("a directive was produced with no measured window")
+	}
+}
+
+func TestSetupStatesTheWindowByDefault(t *testing.T) {
+	// The default matters more than the field: a user who runs `ccgw setup` and
+	// never opens the file should get the window their subscription serves.
+	cfg := setupThenLoad(t, "-y", "-listen", "127.0.0.1:8787")
+	for _, m := range cfg.Models {
+		if m.ContextWindow != codex.DefaultContextWindow {
+			t.Errorf("%s context_window = %d, want %d", m.ID, m.ContextWindow, codex.DefaultContextWindow)
+		}
+	}
+}
+
+func TestSetupHonoursAnExplicitWindow(t *testing.T) {
+	cfg := setupThenLoad(t, "-y", "-codex-window", "400000", "-listen", "127.0.0.1:8787")
+	for _, m := range cfg.Models {
+		if m.ContextWindow != 400000 {
+			t.Errorf("%s context_window = %d, want the one given on the command line", m.ID, m.ContextWindow)
+		}
+	}
+}
+
+// setupThenLoad runs the real command against a signed-in fixture and returns
+// the config it wrote, failing if it configured nothing to assert about.
+func setupThenLoad(t *testing.T, args ...string) *config.Config {
+	t.Helper()
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("CODEX_HOME", signedInCodexHome(t))
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := cmdSetup(append([]string{"-config", cfgPath}, args...)); err != nil {
+		t.Fatalf("cmdSetup: %v", err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("setup wrote a config that does not load: %v", err)
+	}
+	if len(cfg.Models) == 0 {
+		t.Fatal("setup configured no models, so this test would prove nothing")
+	}
+	return cfg
+}
+
+func TestSetupRefusesToClobberAndSaysHow(t *testing.T) {
+	// -y means "take the detected defaults", and the default answer to
+	// "Replace it?" is no - so -y alone can never replace a config. Failing is
+	// right; failing without naming the flag that works is not.
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("CODEX_HOME", signedInCodexHome(t))
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	existing := "listen: 127.0.0.1:9999\n"
+	if err := os.WriteFile(cfgPath, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := cmdSetup([]string{"-y", "-config", cfgPath, "-listen", "127.0.0.1:8787"})
+	if err == nil {
+		t.Fatal("setup replaced an existing config without being asked to")
+	}
+	if !strings.Contains(err.Error(), "-force") {
+		t.Errorf("error does not name the flag that works: %v", err)
+	}
+	raw, readErr := os.ReadFile(cfgPath)
+	if readErr != nil || string(raw) != existing {
+		t.Errorf("the existing config was not left alone: %q", string(raw))
+	}
+}
+
+func TestSetupForceKeepsABackup(t *testing.T) {
+	// setup regenerates from detection, so replacing a hand-tuned config is a
+	// real way to lose work.
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("CODEX_HOME", signedInCodexHome(t))
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	existing := "listen: 127.0.0.1:9999  # hand tuned\n"
+	if err := os.WriteFile(cfgPath, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cmdSetup([]string{"-y", "-force", "-config", cfgPath, "-listen", "127.0.0.1:8787"}); err != nil {
+		t.Fatalf("cmdSetup -force: %v", err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("setup wrote a config that does not load: %v", err)
+	}
+	if cfg.Listen != "127.0.0.1:8787" {
+		t.Errorf("Listen = %q, want the new config", cfg.Listen)
+	}
+	backup, err := os.ReadFile(cfgPath + ".bak")
+	if err != nil {
+		t.Fatalf("no backup of the replaced config: %v", err)
+	}
+	if string(backup) != existing {
+		t.Errorf("backup = %q, want the file that was replaced", string(backup))
+	}
+}
+
+func TestSetupTurnsToolSearchOn(t *testing.T) {
+	// Inlined MCP schemas cost more context than everything else the gateway
+	// touches, so a generated config should not leave the saving behind.
+	cfg := setupThenLoad(t, "-y", "-listen", "127.0.0.1:8787")
+	if !cfg.ToolSearchEnabled() {
+		t.Error("the generated config does not enable tool search")
+	}
+	if cfg.EnableToolSearch == nil {
+		t.Error("tool search is left to the default rather than written out where it can be seen")
+	}
+}

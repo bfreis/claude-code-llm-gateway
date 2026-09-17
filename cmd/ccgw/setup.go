@@ -263,6 +263,10 @@ type answers struct {
 	useCodex     bool
 	codexVersion string
 	codexModels  []string
+	// codexWindow is the real input context window of the Codex models, which
+	// 'ccgw env' turns into the variable that corrects Claude Code's 200k
+	// assumption. Zero leaves it unstated.
+	codexWindow  int
 	useOpenAI    bool
 	openAIKeyEnv string
 	openAIModels []string
@@ -274,6 +278,8 @@ func cmdSetup(args []string) error {
 	force := fs.Bool("force", false, "overwrite an existing config without asking")
 	listen := fs.String("listen", config.DefaultListen, "address the gateway should bind")
 	assumeYes := fs.Bool("y", false, "accept every detected default without asking")
+	codexWindow := fs.Int("codex-window", codex.DefaultContextWindow,
+		"real input context window of the Codex models in tokens; 0 leaves it unstated")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -290,6 +296,13 @@ func cmdSetup(args []string) error {
 	fmt.Println()
 
 	if _, err := os.Stat(*cfgPath); err == nil && !*force {
+		// -y means "take every detected default", and the default answer to
+		// "Replace it?" is no - so -y alone can never get past this. Say which
+		// flag does rather than leaving that to be guessed.
+		if p.assumeYes {
+			return fmt.Errorf("a config already exists at %s - pass -force to replace it "+
+				"(the previous file is kept as %s.bak)", *cfgPath, *cfgPath)
+		}
 		fmt.Printf("A config already exists at %s\n", *cfgPath)
 		if !p.yesNo("Replace it?", false) {
 			return fmt.Errorf("left the existing config alone")
@@ -297,7 +310,7 @@ func cmdSetup(args []string) error {
 		fmt.Println()
 	}
 
-	a := answers{listen: *listen}
+	a := answers{listen: *listen, codexWindow: *codexWindow}
 	if err := planCodex(p, env, &a); err != nil {
 		return err
 	}
@@ -316,8 +329,17 @@ func cmdSetup(args []string) error {
 	if err := os.MkdirAll(filepath.Dir(*cfgPath), 0o755); err != nil {
 		return err
 	}
+	// setup regenerates the file from detection, so anything hand-tuned in the
+	// old one is about to be lost. Keep a copy.
+	backup, err := backupExisting(*cfgPath)
+	if err != nil {
+		return err
+	}
 	if err := os.WriteFile(*cfgPath, []byte(body), 0o644); err != nil {
 		return err
+	}
+	if backup != "" {
+		fmt.Printf("\nkept the previous config as %s\n", backup)
 	}
 	// A config this tool generated should never be one it then refuses to load.
 	cfg, err := config.Load(*cfgPath)
@@ -339,6 +361,23 @@ func cmdSetup(args []string) error {
 
 	printNextSteps(a, env)
 	return nil
+}
+
+// backupExisting copies path to path+".bak" when it exists, returning the
+// backup's name, or "" when there was nothing to keep.
+func backupExisting(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read the config being replaced: %w", err)
+	}
+	dest := path + ".bak"
+	if err := os.WriteFile(dest, raw, 0o600); err != nil {
+		return "", fmt.Errorf("back up the existing config: %w", err)
+	}
+	return dest, nil
 }
 
 // planCodex decides the Codex half, asking only about what detection missed.
@@ -415,12 +454,36 @@ func printNextSteps(a answers, env environment) {
 	if env.claudeKeySource != "" {
 		next("unset %s   # it overrides your Claude subscription", env.claudeKeySource)
 	}
+	// The ChatGPT credential is the one thing setup can finish without: it
+	// writes a valid config either way. Listing no step for it reads as
+	// "handled" rather than "skipped", which is how a gateway with no GPT
+	// models looks like a gateway that worked.
+	if !a.useCodex {
+		next("ccgw codex login         # sign in to ChatGPT for the GPT models")
+		next("ccgw setup -force        # re-run to add them to the config")
+	}
 	next("ccgw serve               # leave running")
 	next(`eval "$(ccgw env)" && claude    # in another terminal`)
+	if a.codexWindow > 0 && len(a.codexModels) > 0 {
+		fmt.Println()
+		fmt.Printf("  'ccgw env' also exports the %d-token context window of the Codex models,\n", a.codexWindow)
+		fmt.Println("  so Claude Code stops compacting at the 200k it assumes for an unknown ID.")
+		fmt.Println("  Launching claude without that eval leaves you on the 200k assumption.")
+	}
+	if a.useCodex {
+		fmt.Println()
+		fmt.Println("  The ChatGPT sign-in is already in place, so there is no codex login step.")
+		fmt.Println("  'ccgw codex status' shows the plan, account and token expiry; only a dead")
+		fmt.Println("  grant needs 'ccgw codex login' again.")
+	}
+	if len(a.codexModels) == 0 && len(a.openAIModels) == 0 {
+		fmt.Println()
+		fmt.Println("  No provider models were configured, so every model still routes to")
+		fmt.Println("  Anthropic and the gateway changes nothing yet.")
+	}
 	fmt.Println()
 	fmt.Println("  Then open /model and pick one of the new rows. Claude Code reads the")
 	fmt.Println("  picker only at startup, so restart it fully after changing models.")
-	_ = a
 }
 
 // renderConfig builds the YAML. It is written out rather than marshalled so the
@@ -442,6 +505,12 @@ func renderConfig(a answers) string {
 	b.WriteString("# prefix is stripped again before the request reaches the provider.\n")
 	fmt.Fprintf(&b, "alias_prefix: %q\n\n", config.DefaultAliasPrefix)
 
+	b.WriteString("# Claude Code stops loading MCP tool schemas on demand behind a base URL\n")
+	b.WriteString("# that is not Anthropic's own, and inlines every one of them instead - the\n")
+	b.WriteString("# largest context cost the gateway imposes. Set this to false if a backend\n")
+	b.WriteString("# answers 400 to the request shape it produces.\n")
+	b.WriteString("enable_tool_search: true\n\n")
+
 	if !a.useCodex && !a.useOpenAI {
 		b.WriteString("providers: []\n\nmodels: []\n\n")
 	} else {
@@ -460,11 +529,21 @@ func renderConfig(a answers) string {
 			fmt.Fprintf(&b, "    api_key_env: %s\n", a.openAIKeyEnv)
 		}
 		b.WriteString("\nmodels:\n")
+		if len(a.codexModels) > 0 && a.codexWindow > 0 {
+			b.WriteString("  # context_window is the measured input limit of the backend. Claude\n")
+			b.WriteString("  # Code assumes 200k for an ID it does not recognise, so without this\n")
+			b.WriteString("  # it compacts at a fraction of what the account serves. 'ccgw env'\n")
+			b.WriteString("  # exports the variable that corrects it. Re-measure and lower this if\n")
+			b.WriteString("  # a long session starts being refused.\n")
+		}
 		for _, m := range a.codexModels {
 			fmt.Fprintf(&b, "  - id: %q\n    provider: codex\n", m)
 			fmt.Fprintf(&b, "    display_name: %q\n", firstNonEmpty(codex.LabelFor(m), displayName(m, "Codex")))
 			if d := codex.DescriptionFor(m); d != "" {
 				fmt.Fprintf(&b, "    description: %q\n", d)
+			}
+			if a.codexWindow > 0 {
+				fmt.Fprintf(&b, "    context_window: %d\n", a.codexWindow)
 			}
 		}
 		for _, m := range a.openAIModels {

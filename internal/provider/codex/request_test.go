@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
@@ -340,5 +341,66 @@ func TestToolResultPrecedesRemainingUserContent(t *testing.T) {
 			t.Errorf("Input[%d].Type = %q, want %q — the tool result must follow its call",
 				i, out.Input[i].Type, w)
 		}
+	}
+}
+
+func TestReplayedReasoningCarriesAnEmptySummary(t *testing.T) {
+	// The Responses API requires `summary` on a reasoning item even when there
+	// is nothing to summarise. Omitting it fails the whole turn with
+	// `missing_required_parameter 'input[N].summary'`, which strands every
+	// Codex conversation on its second turn.
+	sig := EncodeReasoning("rs_123", "encrypted-blob")
+	in := &anthropic.MessagesRequest{Messages: []anthropic.Message{
+		{Role: anthropic.RoleAssistant, Content: mustJSON(t, []anthropic.ContentBlock{
+			{Type: anthropic.BlockThinking, Thinking: "shown to the user", Signature: sig},
+			{Type: anthropic.BlockText, Text: "answer"},
+		})},
+	}}
+	out, err := TranslateRequest(in, "m", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Input[0].Type != ItemReasoning {
+		t.Fatalf("Input[0] = %+v, want a reasoning item", out.Input[0])
+	}
+
+	// Assert on the wire form: the bug is in what json.Marshal emits, and a
+	// nil slice and an empty one look identical through the Go field.
+	raw, err := json.Marshal(out.Input[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		t.Fatal(err)
+	}
+	summary, ok := probe["summary"]
+	if !ok {
+		t.Fatalf("reasoning item has no summary field on the wire: %s", raw)
+	}
+	if string(summary) != "[]" {
+		t.Errorf("summary = %s, want []", summary)
+	}
+	if probe["encrypted_content"] == nil {
+		t.Errorf("the encrypted blob was lost: %s", raw)
+	}
+}
+
+func TestNonReasoningItemsHaveNoSummary(t *testing.T) {
+	// summary belongs to reasoning items only; sending it elsewhere invites a
+	// different rejection.
+	in := &anthropic.MessagesRequest{Messages: []anthropic.Message{
+		{Role: anthropic.RoleUser, Content: mustJSON(t, "hello")},
+	}}
+	out, err := TranslateRequest(in, "m", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(out.Input[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(`"summary"`)) {
+		t.Errorf("a message item carries a summary field: %s", raw)
 	}
 }

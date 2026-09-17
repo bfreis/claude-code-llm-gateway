@@ -7,6 +7,19 @@ type Model struct {
 	Description string
 }
 
+// DefaultContextWindow is the input context window the Codex backend serves.
+//
+// Measured against the endpoint in September 2026 by bisection: roughly 920k
+// input tokens are accepted and roughly 935k are refused with
+// context_length_exceeded. It is deliberately the accepted figure rounded down,
+// because overstating it turns Claude Code's auto-compact into a hard refusal
+// mid-session.
+//
+// This is a property of the backend at a point in time, not a constant. If
+// sessions start failing near the limit, re-measure and set context_window per
+// model in the config.
+const DefaultContextWindow = 920_000
+
 // DefaultModels are the Codex models setup configures out of the box.
 //
 // The IDs are the ones a Codex backend serves; the labels are written out

@@ -215,9 +215,14 @@ func cmdModels(args []string) error {
 	// included, so listing it here shows exactly what Claude Code will see.
 	catalogue := r.Catalogue()
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "MODEL ID (as Claude Code sees it)\tPROVIDER\tUPSTREAM ID\tDISPLAY NAME")
+	fmt.Fprintln(tw, "MODEL ID (as Claude Code sees it)\tPROVIDER\tUPSTREAM ID\tWINDOW\tDISPLAY NAME")
 	for i, m := range cfg.Models {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", catalogue[i].ID, m.Provider, m.ID, catalogue[i].DisplayName)
+		window := "200k (assumed)"
+		if m.ContextWindow > 0 {
+			window = fmt.Sprintf("%d", m.ContextWindow)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			catalogue[i].ID, m.Provider, m.ID, window, catalogue[i].DisplayName)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -226,6 +231,11 @@ func cmdModels(args []string) error {
 		fmt.Println("(no provider models configured; every model falls through to Anthropic)")
 	}
 	fmt.Println("\nAny model ID not listed here is proxied to Anthropic unchanged.")
+	if d, ok := cfg.WindowDirective(); ok {
+		fmt.Printf("'ccgw env' exports %s=%d so Claude Code sizes the context to that.\n", d.Name, d.Value)
+	} else if len(cfg.Models) > 0 {
+		fmt.Println("No model states a context_window, so Claude Code will assume 200k for all of them.")
+	}
 	reportPickerDrift(cfg)
 	for _, w := range r.DiscoveryWarnings() {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
@@ -348,7 +358,94 @@ export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 	default:
 		return fmt.Errorf("unknown mode %q (want fidelity, discovery or gateway)", *mode)
 	}
+	printWindowDirective(cfg)
+	printToolSearch(cfg)
+	printClaudeWindowNote()
 	return nil
+}
+
+// printToolSearch re-enables on-demand loading of MCP tool schemas.
+//
+// Claude Code disables tool search behind any base URL that is not one of
+// Anthropic's own, because it cannot know whether the proxy forwards
+// tool_reference blocks, and falls back to inlining every MCP schema into every
+// request. In a session with a few MCP servers that is the single largest thing
+// the gateway costs you.
+func printToolSearch(cfg *config.Config) {
+	fmt.Println()
+	if !cfg.ToolSearchEnabled() {
+		fmt.Printf("# enable_tool_search is off in the config, so MCP tool schemas are inlined\n")
+		fmt.Printf("# into every request. Cleared here in case the shell already had it set.\n")
+		fmt.Printf("unset %s\n", config.EnvToolSearch)
+		return
+	}
+	fmt.Printf("# Load MCP tool schemas on demand instead of inlining every one of them.\n")
+	fmt.Printf("# Claude Code switches this off behind a non-first-party base URL because it\n")
+	fmt.Printf("# cannot know whether the proxy forwards tool_reference blocks; this one does,\n")
+	fmt.Printf("# byte for byte on the Anthropic path. Set enable_tool_search: false in the\n")
+	fmt.Printf("# config if a backend answers 400 to the request shape it produces.\n")
+	fmt.Printf("export %s=true\n", config.EnvToolSearch)
+}
+
+// printClaudeWindowNote explains why Claude models shrink behind the gateway.
+//
+// Claude Code downgrades a model whose catalogue entry declares a 1M window to
+// the 200k it "believes" whenever ANTHROPIC_BASE_URL is not one of Anthropic's
+// own hosts, which is always true here. That looks exactly like the gateway
+// breaking Claude models, and the fix is not discoverable, so say both.
+//
+// Everything printed is a comment: this output is eval'd.
+func printClaudeWindowNote() {
+	fmt.Print(`
+# Claude models: pointing ANTHROPIC_BASE_URL at anything other than Anthropic's
+# own host costs them their native 1M window. Claude Code keeps the catalogue's
+# declared 1000000 but falls back to the 200000 it believes, so Sonnet 5 reads
+# as 200.0k here and 1.0M without the gateway.
+#
+# Selecting the 1M variant restores it - that suffix is checked before the
+# fallback, so it holds behind any base URL:
+#
+#     /model sonnet[1m]        (or opus[1m], fable[1m], opusplan[1m])
+#
+# The choice persists, and the alias always resolves to the current model, so
+# there is nothing to keep up to date as new models ship. This affects Claude
+# models only; provider models are sized by their config context_window.
+`)
+}
+
+// printWindowDirective exports the real context window of the provider models.
+//
+// Claude Code assumes 200k for any ID it does not recognise, which is every ID
+// this gateway advertises, so without this a session compacts long before the
+// provider would have refused anything.
+func printWindowDirective(cfg *config.Config) {
+	d, ok := cfg.WindowDirective()
+	if !ok {
+		return
+	}
+	fmt.Println()
+	fmt.Printf("# Claude Code assumes a 200k window for a model it does not recognise.\n")
+	switch d.Name {
+	case config.EnvMaxContextTokens:
+		fmt.Printf("# This is the window your provider models really have. It applies only to\n")
+		fmt.Printf("# model IDs that do not begin with \"claude-\", so the Claude models proxied\n")
+		fmt.Printf("# through keep their own windows untouched.\n")
+	case config.EnvAutoCompactWindow:
+		fmt.Printf("# A model configured with long_context is advertised as [1m], which pins\n")
+		fmt.Printf("# Claude Code's cap at 1M before it reads %s.\n", config.EnvMaxContextTokens)
+		fmt.Printf("# This variable lowers it from there to the real number - but it is global,\n")
+		fmt.Printf("# so it also caps any 1M Claude session at the same value.\n")
+	}
+	if d.Mixed {
+		fmt.Printf("# Your models declare different windows and this variable is process-wide,\n")
+		fmt.Printf("# so it takes the smallest. The largest is %d, and that model is held\n", d.Largest)
+		fmt.Printf("# to %d here. Run separate sessions if that matters.\n", d.Value)
+	}
+	if d.Clamped {
+		fmt.Printf("# Clamped: %s only expresses %d-%d.\n",
+			d.Name, config.MinAutoCompactWindow, config.MaxAutoCompactWindow)
+	}
+	fmt.Printf("export %s=%d\n", d.Name, d.Value)
 }
 
 func cmdInit(args []string) error {
@@ -586,11 +683,17 @@ models:
     provider: openai
     display_name: GPT-5.6
     description: OpenAI GPT-5.6
-    # long_context: true   # advertise as gpt-5.6[1m], raising Claude Code's
-                           # client-side window from its 200k default for an
-                           # unrecognised model. The suffix is stripped before
-                           # the request reaches the provider, so only set it
-                           # if the backend really accepts that much input.
+    # context_window: 400000
+                           # the model's real input limit. Claude Code assumes
+                           # 200k for an ID it does not recognise, so without
+                           # this it compacts early; 'ccgw env' exports the
+                           # variable that corrects it. Measure rather than
+                           # guess - overstating it turns a graceful compact
+                           # into a hard refusal from the provider.
+    # long_context: true   # advertise as gpt-5.6[1m]. Only for a backend that
+                           # really accepts 1M; it also changes which variable
+                           # 'ccgw env' uses. The suffix is stripped before the
+                           # request reaches the provider.
 
 # Every model ID not listed above is proxied to Anthropic unchanged, so all the
 # Claude models keep working without being enumerated here.

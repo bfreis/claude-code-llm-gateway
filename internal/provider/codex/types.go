@@ -80,7 +80,12 @@ type Item struct {
 
 	// reasoning
 	EncryptedContent string `json:"encrypted_content,omitempty"`
-	Summary          []Part `json:"summary,omitempty"`
+	// Summary is required on a reasoning item even when there is nothing to
+	// summarise, so it is a pointer: `omitempty` cannot tell a nil slice from
+	// an empty one, and omitting the field fails the turn with
+	// `missing_required_parameter 'input[N].summary'`. Every other item type
+	// leaves it nil so the field does not appear at all.
+	Summary *[]Part `json:"summary,omitempty"`
 
 	// ID is echoed back when replaying an item the backend produced.
 	ID string `json:"id,omitempty"`
