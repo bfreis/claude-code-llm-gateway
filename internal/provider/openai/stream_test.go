@@ -77,6 +77,42 @@ func chunk(t *testing.T, v any) string {
 	return "data: " + string(b) + "\n\n"
 }
 
+func TestStreamFinalUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		usage                 string
+		input, cached, output int
+	}{
+		{"uncached", `{"prompt_tokens":100,"completion_tokens":7}`, 100, 0, 7},
+		{"cached", `{"prompt_tokens":100,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":80}}`, 20, 80, 7},
+		{"fully_cached", `{"prompt_tokens":100,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":100}}`, 0, 100, 7},
+		{"zero_cache", `{"prompt_tokens":100,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":0}}`, 100, 0, 7},
+		{"missing_usage", `null`, 0, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := chunk(t, StreamChunk{Choices: []StreamChoice{{Delta: ChunkDelta{Content: ptr("Hello")}}}}) +
+				chunk(t, StreamChunk{Choices: []StreamChoice{{FinishReason: ptr("stop")}}}) +
+				"data: {\"choices\":[],\"usage\":" + tc.usage + "}\n\n" +
+				"data: [DONE]\n\n"
+			fs := runStream(t, body, Options{})
+			if len(fs) < 2 || fs[len(fs)-2].name != anthropic.EvMessageDelta || fs[len(fs)-1].name != anthropic.EvMessageStop {
+				t.Fatalf("missing terminal events: %v", names(fs))
+			}
+			usage := fs[len(fs)-2].data["usage"].(map[string]any)
+			for field, want := range map[string]int{
+				"input_tokens":                tc.input,
+				"output_tokens":               tc.output,
+				"cache_read_input_tokens":     tc.cached,
+				"cache_creation_input_tokens": 0,
+			} {
+				if got := usage[field]; got != float64(want) {
+					t.Errorf("%s = %v, want %d", field, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestStreamTextOnly(t *testing.T) {
 	body := chunk(t, StreamChunk{Choices: []StreamChoice{{Delta: ChunkDelta{Content: ptr("Hel")}}}}) +
 		chunk(t, StreamChunk{Choices: []StreamChoice{{Delta: ChunkDelta{Content: ptr("lo")}}}}) +

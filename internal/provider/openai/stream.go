@@ -250,7 +250,12 @@ func (t *StreamTranslator) finish() error {
 	if err := t.out.Event(anthropic.EvMessageDelta, anthropic.MessageDeltaEvent{
 		Type:  anthropic.EvMessageDelta,
 		Delta: anthropic.MessageDeltaBody{StopReason: &stop},
-		Usage: anthropic.MessageDeltaUsage{OutputTokens: t.usage.OutputTokens},
+		Usage: anthropic.MessageDeltaUsage{
+			InputTokens:              t.usage.InputTokens,
+			OutputTokens:             t.usage.OutputTokens,
+			CacheCreationInputTokens: t.usage.CacheCreationInputTokens,
+			CacheReadInputTokens:     t.usage.CacheReadInputTokens,
+		},
 	}); err != nil {
 		return err
 	}

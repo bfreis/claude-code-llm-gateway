@@ -55,9 +55,12 @@ type ResponseBody struct {
 
 // Usage is the token accounting on response.completed.
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	InputTokens        int `json:"input_tokens"`
+	OutputTokens       int `json:"output_tokens"`
+	TotalTokens        int `json:"total_tokens"`
+	InputTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"input_tokens_details,omitempty"`
 }
 
 // ResponseError is the failure payload on response.failed.
@@ -251,6 +254,9 @@ func (t *StreamTranslator) event(ev *StreamEvent) error {
 	case EvIncomplete:
 		// Not a failure: the turn produced content and stopped early.
 		t.stopReason = anthropic.StopMaxTokens
+		if ev.Response != nil && ev.Response.Usage != nil {
+			t.usage = *ev.Response.Usage
+		}
 		return nil
 	}
 	return nil
@@ -403,10 +409,18 @@ func (t *StreamTranslator) finish() error {
 			stop = anthropic.StopEndTurn
 		}
 	}
+	usage := anthropic.MessageDeltaUsage{
+		InputTokens:  t.usage.InputTokens,
+		OutputTokens: t.usage.OutputTokens,
+	}
+	if details := t.usage.InputTokensDetails; details != nil && details.CachedTokens > 0 {
+		usage.CacheReadInputTokens = details.CachedTokens
+		usage.InputTokens = max(0, t.usage.InputTokens-details.CachedTokens)
+	}
 	if err := t.out.Event(anthropic.EvMessageDelta, anthropic.MessageDeltaEvent{
 		Type:  anthropic.EvMessageDelta,
 		Delta: anthropic.MessageDeltaBody{StopReason: &stop},
-		Usage: anthropic.MessageDeltaUsage{OutputTokens: t.usage.OutputTokens},
+		Usage: usage,
 	}); err != nil {
 		return err
 	}

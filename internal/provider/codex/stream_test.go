@@ -53,6 +53,50 @@ func runStream(t *testing.T, body string, opt StreamOptions) []frame {
 	return out
 }
 
+func TestStreamFinalUsage(t *testing.T) {
+	for _, terminal := range []string{EvCompleted, EvIncomplete} {
+		for _, tc := range []struct {
+			name                  string
+			usage                 string
+			input, cached, output int
+		}{
+			{"uncached", `{"input_tokens":100,"output_tokens":7}`, 100, 0, 7},
+			{"cached", `{"input_tokens":100,"output_tokens":7,"input_tokens_details":{"cached_tokens":80}}`, 20, 80, 7},
+			{"fully_cached", `{"input_tokens":100,"output_tokens":7,"input_tokens_details":{"cached_tokens":100}}`, 0, 100, 7},
+			{"zero_cache", `{"input_tokens":100,"output_tokens":7,"input_tokens_details":{"cached_tokens":0}}`, 100, 0, 7},
+			{"missing_usage", `null`, 0, 0, 0},
+		} {
+			t.Run(terminal+"/"+tc.name, func(t *testing.T) {
+				body := sse(t, map[string]any{"type": EvOutputTextDelta, "delta": "Hello"}) +
+					sse(t, map[string]any{"type": terminal, "response": map[string]any{"usage": json.RawMessage(tc.usage)}})
+				fs := runStream(t, body, StreamOptions{})
+				if len(fs) < 2 || fs[len(fs)-2].name != anthropic.EvMessageDelta || fs[len(fs)-1].name != anthropic.EvMessageStop {
+					t.Fatalf("missing terminal events: %v", names(fs))
+				}
+				last := fs[len(fs)-2].data
+				wantStop := anthropic.StopEndTurn
+				if terminal == EvIncomplete {
+					wantStop = anthropic.StopMaxTokens
+				}
+				if got := last["delta"].(map[string]any)["stop_reason"]; got != wantStop {
+					t.Errorf("stop_reason = %v, want %s", got, wantStop)
+				}
+				usage := last["usage"].(map[string]any)
+				for field, want := range map[string]int{
+					"input_tokens":                tc.input,
+					"output_tokens":               tc.output,
+					"cache_read_input_tokens":     tc.cached,
+					"cache_creation_input_tokens": 0,
+				} {
+					if got := usage[field]; got != float64(want) {
+						t.Errorf("%s = %v, want %d", field, got, want)
+					}
+				}
+			})
+		}
+	}
+}
+
 func names(fs []frame) []string {
 	out := make([]string, len(fs))
 	for i, f := range fs {
