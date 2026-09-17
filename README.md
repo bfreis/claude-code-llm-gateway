@@ -659,6 +659,22 @@ provider type does no translation.
 - **`count_tokens` for provider models is an estimate**, not a tokenizer count.
 - **The gateway does not supervise itself.** It is a plain server you run; if it
   dies, Claude Code sees a connection error until you restart it.
+- **`--resume` does not restore a provider model.** Claude Code's own
+  restore-on-resume check only accepts a persisted model whose family is in its
+  built-in list (`opus`, `sonnet`, `haiku`, `fable`, …) or that already matches
+  what this new invocation would use anyway. It never consults the gateway's
+  discovery cache for this check, so a session last run under a provider alias
+  like `anthropic/gpt-6-astra` always fails that check and gets a
+  "could not be restored ... using opusplan instead" warning, even with the
+  same `ccgw` env vars exported and the cache in sync. Give it an explicit
+  override instead of relying on auto-restore:
+
+  ```sh
+  claude --resume <session-id> --model anthropic/gpt-6-astra
+  ```
+
+  Setting `ANTHROPIC_MODEL` to the same alias before resuming works too — either
+  one makes Claude Code skip the auto-restore path.
 
 ## License
 
