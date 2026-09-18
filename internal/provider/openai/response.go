@@ -130,10 +130,9 @@ func translateUsage(u *ChatUsage) anthropic.Usage {
 	return out
 }
 
-// messageID gives the response an Anthropic-shaped id.
+// messageID gives the response an Anthropic-shaped id. It must differ between
+// responses even when the backend sends none, so the empty case is random
+// rather than constant — see anthropic.NewMessageID.
 func messageID(openaiID string) string {
-	if openaiID == "" {
-		return "msg_gateway"
-	}
-	return "msg_" + openaiID
+	return anthropic.NewMessageID(openaiID)
 }

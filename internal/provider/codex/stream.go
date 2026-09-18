@@ -111,6 +111,10 @@ type StreamTranslator struct {
 	sawToolCall bool
 	failed      bool
 
+	// messageID identifies this response to Claude Code, which groups a
+	// response's messages by it. See anthropic.NewMessageID.
+	messageID string
+
 	// estimatedInputTokens seeds message_start's usage so Claude Code's
 	// context display does not flash to zero before the real count arrives
 	// in message_delta. See anthropic.EstimateInputTokens.
@@ -141,6 +145,7 @@ func NewStreamTranslator(out *anthropic.StreamWriter, modelID string, opt Stream
 		opt:                  opt,
 		blockFor:             map[int]int{},
 		estimatedInputTokens: estimatedInputTokens,
+		messageID:            anthropic.NewMessageID(""),
 	}
 }
 
@@ -176,6 +181,11 @@ func (t *StreamTranslator) Run(body io.Reader) error {
 func (t *StreamTranslator) event(ev *StreamEvent) error {
 	switch ev.Type {
 	case EvCreated:
+		// The backend's response id is the natural per-response id; the random
+		// one from the constructor stands in when the event carries none.
+		if !t.started && ev.Response != nil && ev.Response.ID != "" {
+			t.messageID = anthropic.NewMessageID(ev.Response.ID)
+		}
 		return t.ensureStarted()
 
 	case EvOutputItemAdded:
@@ -389,7 +399,7 @@ func (t *StreamTranslator) ensureStarted() error {
 	return t.out.Event(anthropic.EvMessageStart, anthropic.MessageStartEvent{
 		Type: anthropic.EvMessageStart,
 		Message: anthropic.MessageStartBody{
-			ID:      "msg_codex",
+			ID:      t.messageID,
 			Type:    "message",
 			Role:    anthropic.RoleAssistant,
 			Model:   t.modelID,
@@ -423,6 +433,13 @@ func (t *StreamTranslator) finish() error {
 	if details := t.usage.InputTokensDetails; details != nil && details.CachedTokens > 0 {
 		usage.CacheReadInputTokens = details.CachedTokens
 		usage.InputTokens = max(0, t.usage.InputTokens-details.CachedTokens)
+	}
+	// A stream that ends without reporting usage would otherwise report zero,
+	// and Claude Code reads a zero total as a real measurement rather than a
+	// missing one: its status line divides it by the window and shows no
+	// context in use at all. The seed message_start carried is a better answer.
+	if usage.InputTokens+usage.CacheReadInputTokens+usage.CacheCreationInputTokens == 0 {
+		usage.InputTokens = t.estimatedInputTokens
 	}
 	if err := t.out.Event(anthropic.EvMessageDelta, anthropic.MessageDeltaEvent{
 		Type:  anthropic.EvMessageDelta,

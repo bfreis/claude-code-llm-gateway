@@ -27,9 +27,14 @@ func sse(t *testing.T, ev map[string]any) string {
 
 func runStream(t *testing.T, body string, opt StreamOptions) []frame {
 	t.Helper()
+	return runStreamWithEstimate(t, body, opt, 0)
+}
+
+func runStreamWithEstimate(t *testing.T, body string, opt StreamOptions, estimate int) []frame {
+	t.Helper()
 	rec := httptest.NewRecorder()
 	sw := anthropic.NewStreamWriter(rec)
-	tr := NewStreamTranslator(sw, "anthropic/gpt-5.6-sol", opt, 0)
+	tr := NewStreamTranslator(sw, "anthropic/gpt-5.6-sol", opt, estimate)
 	if err := tr.Run(strings.NewReader(body)); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -101,6 +106,8 @@ func TestStreamFinalUsage(t *testing.T) {
 			{"cached", `{"input_tokens":100,"output_tokens":7,"input_tokens_details":{"cached_tokens":80}}`, 20, 80, 7},
 			{"fully_cached", `{"input_tokens":100,"output_tokens":7,"input_tokens_details":{"cached_tokens":100}}`, 0, 100, 7},
 			{"zero_cache", `{"input_tokens":100,"output_tokens":7,"input_tokens_details":{"cached_tokens":0}}`, 100, 0, 7},
+			// Zero only because runStream seeds no estimate; with one, finish
+			// falls back to it. See TestStreamFinalUsageFallsBackToTheEstimate.
 			{"missing_usage", `null`, 0, 0, 0},
 		} {
 			t.Run(terminal+"/"+tc.name, func(t *testing.T) {
@@ -463,4 +470,66 @@ func equal(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// messageStartID pulls the id out of a translated stream's message_start.
+func messageStartID(t *testing.T, fs []frame) string {
+	t.Helper()
+	if len(fs) == 0 || fs[0].name != anthropic.EvMessageStart {
+		t.Fatalf("expected message_start first, got %v", names(fs))
+	}
+	id, ok := fs[0].data["message"].(map[string]any)["id"].(string)
+	if !ok {
+		t.Fatalf("message_start carries no string id: %v", fs[0].data)
+	}
+	return id
+}
+
+func TestStreamMessageIDComesFromTheResponse(t *testing.T) {
+	body := sse(t, map[string]any{"type": EvCreated, "response": map[string]any{"id": "resp_abc123"}}) +
+		sse(t, map[string]any{"type": EvOutputTextDelta, "delta": "Hi"}) +
+		sse(t, map[string]any{"type": EvCompleted, "response": map[string]any{"usage": json.RawMessage(`{"input_tokens":10,"output_tokens":1}`)}})
+	if got, want := messageStartID(t, runStream(t, body, StreamOptions{})), "msg_resp_abc123"; got != want {
+		t.Errorf("message id = %q, want %q", got, want)
+	}
+}
+
+// Claude Code groups a response's messages by this id, so two responses must
+// never share one: it walks back through same-id messages to find where the
+// current response began, and dedupes its cumulative token count on it. See
+// anthropic.NewMessageID.
+func TestStreamMessageIDsDifferWhenTheResponseHasNoID(t *testing.T) {
+	body := sse(t, map[string]any{"type": EvCreated, "response": map[string]any{}}) +
+		sse(t, map[string]any{"type": EvOutputTextDelta, "delta": "Hi"}) +
+		sse(t, map[string]any{"type": EvCompleted, "response": map[string]any{"usage": json.RawMessage(`{"input_tokens":10,"output_tokens":1}`)}})
+	first := messageStartID(t, runStream(t, body, StreamOptions{}))
+	second := messageStartID(t, runStream(t, body, StreamOptions{}))
+	if first == second {
+		t.Errorf("both responses claim id %q; every response needs its own", first)
+	}
+	for _, id := range []string{first, second} {
+		if !strings.HasPrefix(id, "msg_") {
+			t.Errorf("id %q does not look like an Anthropic message id", id)
+		}
+	}
+}
+
+// A zero total is indistinguishable from a real measurement to Claude Code: it
+// divides it by the window and reports no context in use. The estimate that
+// seeded message_start is the better answer when the backend reports nothing.
+func TestStreamFinalUsageFallsBackToTheEstimate(t *testing.T) {
+	for _, terminal := range []string{EvCompleted, EvIncomplete} {
+		t.Run(terminal, func(t *testing.T) {
+			body := sse(t, map[string]any{"type": EvOutputTextDelta, "delta": "Hello"}) +
+				sse(t, map[string]any{"type": terminal, "response": map[string]any{"usage": nil}})
+			fs := runStreamWithEstimate(t, body, StreamOptions{}, 4242)
+			if len(fs) < 2 || fs[len(fs)-2].name != anthropic.EvMessageDelta {
+				t.Fatalf("expected message_delta before message_stop, got %v", names(fs))
+			}
+			usage := fs[len(fs)-2].data["usage"].(map[string]any)
+			if got := usage["input_tokens"]; got != float64(4242) {
+				t.Errorf("message_delta input_tokens = %v, want 4242 (the estimate, not zero)", got)
+			}
+		})
+	}
 }

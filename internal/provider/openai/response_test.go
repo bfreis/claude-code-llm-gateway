@@ -174,3 +174,24 @@ func TestMessageTextFromParts(t *testing.T) {
 		t.Errorf("messageText = %q", got)
 	}
 }
+
+// A backend that returns no id of its own must still get a distinct id per
+// response: Claude Code groups a response's messages by it and dedupes its
+// cumulative token count on it. See anthropic.NewMessageID.
+func TestTranslateResponseIDsDifferWithoutAnUpstreamID(t *testing.T) {
+	in := &ChatResponse{Choices: []ChatChoice{{
+		Message:      ChatMsg{Role: RoleAssistant, Content: json.RawMessage(`"hi"`)},
+		FinishReason: "stop",
+	}}}
+	first, err := TranslateResponse(in, "anthropic/gpt-5.6", Options{})
+	if err != nil {
+		t.Fatalf("TranslateResponse: %v", err)
+	}
+	second, err := TranslateResponse(in, "anthropic/gpt-5.6", Options{})
+	if err != nil {
+		t.Fatalf("TranslateResponse: %v", err)
+	}
+	if first.ID == second.ID {
+		t.Errorf("both responses claim id %q; every response needs its own", first.ID)
+	}
+}
