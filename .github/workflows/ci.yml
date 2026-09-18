@@ -36,26 +36,22 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # One target per step rather than a single `make ci`: the targets are
+      # the same four checks in the same order, but separate steps keep a
+      # formatting failure and a race failure distinguishable in the checks
+      # UI. make echoes each command, so the logs still show the go
+      # invocation. The rationale for each check lives in the Makefile.
       - name: Build
-        run: go build ./...
+        run: make build
 
       - name: Vet
-        run: go vet ./...
+        run: make vet
 
       - name: Check formatting
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "These files are not gofmt-clean:"
-            echo "$unformatted"
-            gofmt -d .
-            exit 1
-          fi
+        run: make fmt-check
 
       - name: Test
-        # -race is the point of running this in CI: the gateway writes an SSE
-        # stream from a keepalive goroutine while the translator writes too.
-        run: go test -race ./...
+        run: make race
 
   build-matrix:
     name: cross-build (${{ matrix.goos }}/${{ matrix.goarch }})

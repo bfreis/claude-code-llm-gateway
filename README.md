@@ -436,6 +436,17 @@ events are accepted anywhere in the stream, including before `message_start`
 
 ## Development
 
+`make` lists every target; each one is a shortcut for something documented
+here, so none of them is required.
+
+```sh
+make ci          # build, vet, gofmt check, tests under -race: what CI runs
+make build       # ./ccgw, as in the quick start above
+make cross       # the five platforms CI cross-builds, into dist/
+```
+
+The underlying commands work on their own:
+
 ```sh
 go test ./...
 go vet ./...
@@ -458,7 +469,9 @@ python3 scripts/verify-picker.py http://127.0.0.1:8787 "GPT-5.6"   # exit 1
 ```
 
 **Run both.** A row present in the first run proves nothing on its own — only
-its disappearance in the second shows it came from the cache. That pair is how
+its disappearance in the second shows it came from the cache. `make
+verify-picker MODEL="GPT-5.6"` runs the pair and fails unless the second run
+fails, then writes the cache back. That pair is how
 this feature was verified: with the cache the picker listed
 
 ```
