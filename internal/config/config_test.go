@@ -260,3 +260,33 @@ func TestAnthropicCompatibleRequiresBaseURL(t *testing.T) {
 		t.Errorf("error = %v, want base_url required", err)
 	}
 }
+
+func TestAssumeFirstPartyDefaultsOff(t *testing.T) {
+	// It trades the /model rows for managed settings, so an absent key must
+	// leave the gateway doing what it was installed to do.
+	c, err := Parse([]byte("{}\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.AssumeFirstPartyEnabled() {
+		t.Error("AssumeFirstPartyEnabled() is on by default")
+	}
+}
+
+func TestAssumeFirstPartyIsHonoured(t *testing.T) {
+	for _, tc := range []struct {
+		yaml string
+		want bool
+	}{
+		{"assume_first_party: true\n", true},
+		{"assume_first_party: false\n", false},
+	} {
+		c, err := Parse([]byte(tc.yaml))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tc.yaml, err)
+		}
+		if got := c.AssumeFirstPartyEnabled(); got != tc.want {
+			t.Errorf("Parse(%q): AssumeFirstPartyEnabled() = %v, want %v", tc.yaml, got, tc.want)
+		}
+	}
+}

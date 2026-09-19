@@ -352,8 +352,8 @@ func cmdSetup(args []string) error {
 	// An already-running gateway does not re-read its config, so without this
 	// the models just configured would not reach the picker until the gateway
 	// happened to be restarted — which looks exactly like setup not working.
-	if res, err := syncPicker(cfg); err != nil {
-		fmt.Printf("could not write the model-picker cache: %v\n", err)
+	if res, err := syncPicker(cfg, *cfgPath); err != nil {
+		fmt.Printf("could not write the model picker: %v\n", err)
 		fmt.Println("run 'ccgw sync-picker' once the gateway config is settled")
 	} else {
 		fmt.Printf("wrote %s (%d models)\n", res.Path, res.Count)
@@ -510,6 +510,15 @@ func renderConfig(a answers) string {
 	b.WriteString("# largest context cost the gateway imposes. Set this to false if a backend\n")
 	b.WriteString("# answers 400 to the request shape it produces.\n")
 	b.WriteString("enable_tool_search: true\n\n")
+
+	b.WriteString("# Turn this on to have Claude Code treat the gateway's base URL as if it\n")
+	b.WriteString("# were api.anthropic.com: remote managed settings are fetched again - it\n")
+	b.WriteString("# refuses to behind a custom base URL - and Claude models keep their native\n")
+	b.WriteString("# 1M window. It turns gateway model discovery off, so the models below reach\n")
+	b.WriteString("# /model through a curated settings file that Claude Code has to be passed\n")
+	b.WriteString("# with --settings; 'ccgw env' emits an alias for it. Fidelity mode only.\n")
+	b.WriteString("# Internal Claude Code flag; may break.\n")
+	b.WriteString("assume_first_party: false\n\n")
 
 	if !a.useCodex && !a.useOpenAI {
 		b.WriteString("providers: []\n\nmodels: []\n\n")

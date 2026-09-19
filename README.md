@@ -70,6 +70,7 @@ against Claude Code 2.1.273 with the same prompt in each mode.
 | | `fidelity` (default) | `discovery` | `gateway` |
 |---|---|---|---|
 | models in `/model` picker | **yes** (from the cache) | yes (fetched) | yes (fetched) |
+| compatible with `assume_first_party` | **yes** | no | no |
 | `anthropic-beta` values | **11** | 9 | 4 |
 | prompt cache `ttl` | **1 h** | 5 min (default) | 5 min (default) |
 | `cache_control` breakpoints | 3 | 3 | 3 |
@@ -130,6 +131,11 @@ function Vg(){ if(!a.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY) return false;
   if(!a.ANTHROPIC_BASE_URL) return false; return true }
 ```
 
+`Ko()` there is the is-this-base-URL-Anthropic's-own check, and discovery needs
+it to be **false** — which is why `assume_first_party`, whose whole job is to
+force it true, costs the picker. See [Managed settings, and
+`assume_first_party`](#managed-settings-and-assume_first_party).
+
 So `ccgw serve` writes that cache itself, at
 `$CLAUDE_CONFIG_DIR/cache/gateway-models.json` (default `~/.claude/cache/…`),
 mode 0600:
@@ -157,7 +163,10 @@ export ANTHROPIC_MODEL=anthropic/gpt-5.6
 ```
 
 Claude Code prints a harmless `[claude-code:unrecognized_model]` warning for an
-ID it does not know, then sends the request anyway.
+ID it does not know, then sends the request anyway — with the default
+`assume_first_party: false`. Turning that flag on also turns the warning into
+real validation against the catalogue, and
+`ANTHROPIC_CUSTOM_MODEL_OPTION` becomes the way to exempt one ID from it.
 
 ### `gateway` — kept for completeness
 
@@ -230,6 +239,7 @@ model exactly like a real Claude ID.
 ```yaml
 listen: 127.0.0.1:8787
 alias_prefix: "anthropic/"
+assume_first_party: false    # managed settings + 1M Claude; needs claude --settings
 
 anthropic:
   base_url: https://api.anthropic.com
@@ -261,6 +271,86 @@ models:
     # context_window: 400000 # the model's real input limit; see below
     # long_context: true     # advertise as gpt-5.6[1m]; see below
 ```
+
+### Managed settings, and `assume_first_party`
+
+Pointing `ANTHROPIC_BASE_URL` at a gateway costs you **remote managed
+settings** — the half of managed settings that arrives over the network, as
+opposed to a `managed-settings.json` installed by MDM, which keeps applying
+either way. If your organisation delivers settings from Anthropic's side, they
+silently stop reaching you.
+
+It is not a delivery problem, and no amount of proxying fixes it. Claude Code
+decides whether to fetch at all, and refuses with the internal reason
+`custom_base_url`; the fetch itself is hardcoded to
+`api.anthropic.com/api/claude_code/settings` and never passes through the
+gateway. One internal flag clears the check, by making Claude Code classify the
+base URL as Anthropic's own:
+
+```yaml
+assume_first_party: true
+```
+
+`ccgw env` then exports `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1`. The same
+classification governs several other features, so turning it on changes more
+than one thing:
+
+| | `assume_first_party: false` (default) | `true` |
+|---|---|---|
+| remote managed settings | **not fetched** (`custom_base_url`) | fetched, straight from Anthropic with your own login |
+| provider models in `/model` | all of them, from the discovery cache | all of them, from a curated `--settings` file |
+| how `claude` is launched | `claude` | `claude --settings …`, via an alias `ccgw env` emits |
+| Claude models' window | 200k, `[1m]` suffix to restore | **native 1M**, no suffix needed |
+| MCP tool search | off unless `ENABLE_TOOL_SEARCH` is exported | on by default |
+| launch modes | all three | `fidelity` only |
+
+#### Where the picker rows come from instead
+
+Gateway model discovery requires the base URL *not* to be first-party, so the
+flag takes it away — and with it the rows, from the live fetch and from the
+cache `ccgw serve` writes alike. They come back through a different door:
+Claude Code's **`modelPicker`** setting, which curates the picker with your own
+labels and is honoured from managed settings, user settings, and `--settings`.
+
+`ccgw sync-picker` (and `ccgw serve`) writes that file next to your config
+instead of the discovery cache:
+
+```json
+{ "modelPicker": { "options": [
+  {"model": "anthropic/gpt-6-astra", "label": "GPT-6 Astra (Codex)", "description": "…"} ] } }
+```
+
+`--settings` is an additional settings *source*, not a replacement, so your own
+`settings.json` and the checkout's `settings.local.json` still apply, and
+`replaceBuiltInOptions` is deliberately never written — the Claude lineup stays.
+Since no environment variable can pass a command-line flag, `ccgw env` emits an
+alias:
+
+```sh
+alias claude='claude --settings /Users/you/.config/ccgw/model-picker.settings.json'
+```
+
+If you already pass your own `--settings`, drop the alias and merge the
+`modelPicker` block into that file instead. `ccgw env` also exports
+`ANTHROPIC_CUSTOM_MODEL_OPTION` for the *first* model, which needs no flag and
+so covers a `claude` that bypasses the alias — a script, an editor extension,
+`command claude`. Claude Code de-duplicates the overlap by model ID.
+
+`make verify-picker-first-party SETTINGS=<path> MODEL="<row>"` proves the rows
+arrive, by driving the real TUI twice: once with the file and once with an empty
+`options` array, insisting the row is present then gone. Verified against
+2.1.277 — all four of a four-model catalogue, with managed settings applied
+(`Org default` annotations) and Claude models at 1.0M in the same session.
+
+`discovery` and `gateway` modes are refused with an error rather than printed:
+the first is built on the discovery this switches off, and the second takes the
+provider out of first-party altogether, so the flag is never consulted and
+managed settings fail on gateway pinning instead.
+
+**The leading underscore is Anthropic's.** This is an internal, undocumented
+flag, free to disappear in any release — the behaviour above was read out of the
+Claude Code 2.1.277 binary, not out of any documentation. If managed settings
+stop arriving after an upgrade, check here first.
 
 ### MCP tool schemas
 

@@ -8,6 +8,12 @@ reports whether an expected row is there.
 
     scripts/verify-picker.py http://127.0.0.1:8787 "GPT-5.6"
 
+With --first-party it checks the other arrangement instead: the flag set, gateway
+discovery off, and the rows coming from a `ccgw sync-picker` settings file.
+
+    scripts/verify-picker.py http://127.0.0.1:8787 "GPT-5.6" \
+        --first-party ~/.config/ccgw/model-picker.settings.json
+
 Exits 0 when the row is found, 1 when it is not, so it also serves as the
 negative control: remove the cache with `ccgw sync-picker -remove`, run again,
 and the same command should now fail. Only the pair of results proves anything —
@@ -62,7 +68,7 @@ def squeeze(text: str) -> str:
     return "".join(text.split())
 
 
-def child_env(base_url: str) -> dict:
+def child_env(base_url: str, first_party: bool = False) -> dict:
     env = dict(os.environ)
     # A nested Claude Code session inherits markers that change its behaviour,
     # and any credential override would defeat the point of the check.
@@ -82,13 +88,23 @@ def child_env(base_url: str) -> dict:
             "LINES": str(ROWS),
         }
     )
+    if first_party:
+        # The two arrangements are mutually exclusive: Claude Code requires the
+        # base URL *not* to look first-party before it will read a discovered
+        # model list, so leaving the discovery variable set here would be
+        # testing neither one.
+        env["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"] = "1"
+        env.pop("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", None)
     return env
 
 
-def capture(base_url: str) -> str:
+def capture(base_url: str, settings: str | None = None) -> str:
     pid, fd = pty.fork()
     if pid == 0:
-        os.execvpe("claude", ["claude"], child_env(base_url))
+        argv = ["claude"]
+        if settings is not None:
+            argv += ["--settings", settings]
+        os.execvpe("claude", argv, child_env(base_url, first_party=settings is not None))
 
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     os.set_blocking(fd, False)
@@ -129,12 +145,24 @@ def capture(base_url: str) -> str:
 
 
 def main() -> int:
-    if len(sys.argv) < 3:
+    args = sys.argv[1:]
+    settings = None
+    if "--first-party" in args:
+        i = args.index("--first-party")
+        if i + 1 >= len(args):
+            print("--first-party needs the path to a model-picker settings file", file=sys.stderr)
+            return 2
+        settings = os.path.abspath(os.path.expanduser(args[i + 1]))
+        del args[i : i + 2]
+        if not os.path.exists(settings):
+            print(f"no settings file at {settings}; run 'ccgw sync-picker' first", file=sys.stderr)
+            return 2
+    if len(args) < 2:
         print(__doc__.strip(), file=sys.stderr)
         return 2
-    base_url, expected = sys.argv[1], sys.argv[2]
+    base_url, expected = args[0], args[1]
 
-    text = capture(base_url)
+    text = capture(base_url, settings)
     if "Is this a project you created or one you trust" in text:
         print("stopped at the folder-trust prompt; run from a trusted directory", file=sys.stderr)
         return 2

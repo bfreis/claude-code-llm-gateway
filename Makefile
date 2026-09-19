@@ -18,7 +18,7 @@ BASE ?= http://127.0.0.1:8787
 MODEL ?= GPT-5.6
 
 .DEFAULT_GOAL := help
-.PHONY: help build install run test race vet fmt fmt-check ci cross verify-picker clean
+.PHONY: help build install run test race vet fmt fmt-check ci cross verify-picker verify-picker-first-party clean
 
 help: ## List the available targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -88,6 +88,29 @@ verify-picker: build ## Prove a model reaches Claude Code's /model picker
 	fi
 	@echo "==> both halves as expected; restoring the cache"
 	./$(BINARY) sync-picker
+
+# The assume_first_party arrangement loses gateway discovery, so its rows come
+# from a curated settings file instead. Same two-run logic as verify-picker: the
+# row must be present with the real file and gone with an empty one, or it came
+# from somewhere else. Needs a config with assume_first_party: true, so that
+# `ccgw sync-picker` writes the settings file rather than the cache.
+verify-picker-first-party: build ## Prove the curated rows reach /model under assume_first_party
+	@test -n "$(SETTINGS)" || { \
+		echo "SETTINGS=<path> is required - run 'ccgw sync-picker' and use the path it prints"; \
+		exit 1; \
+	}
+	@echo "==> with the curated settings: expecting the row to be found"
+	python3 scripts/verify-picker.py $(BASE) "$(MODEL)" --first-party "$(SETTINGS)"
+	@control=$${TMPDIR:-/tmp}/ccgw-empty-picker.json; \
+	echo '{"modelPicker":{"options":[]}}' > $$control; \
+	echo "==> with an empty options list: expecting the row to be gone"; \
+	if python3 scripts/verify-picker.py $(BASE) "$(MODEL)" --first-party $$control; then \
+		echo "FAIL: the row survived an empty modelPicker, so the settings file did not put it there"; \
+		rm -f $$control; \
+		exit 1; \
+	fi; \
+	rm -f $$control
+	@echo "==> both halves as expected"
 
 clean: ## Remove build output
 	rm -f $(BINARY)

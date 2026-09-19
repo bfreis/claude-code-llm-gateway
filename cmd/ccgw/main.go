@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -47,6 +48,10 @@ Modes for 'env':
                       prompt cache. Use it if you run on an API key.
   gateway             Enterprise gateway mode. Sends the fewest features; kept
                       for completeness only.
+
+Set assume_first_party: true in the config to get remote managed settings and
+the native 1M Claude window back, at the cost of the /model rows. It applies to
+'fidelity' only - the other two modes depend on the discovery it switches off.
 `
 
 func main() {
@@ -160,10 +165,13 @@ func cmdServe(args []string) error {
 	}
 
 	if !*noPicker {
-		res, err := syncPicker(cfg)
+		res, err := syncPicker(cfg, *cfgPath)
 		if err != nil {
 			// The gateway is still perfectly usable without the picker rows.
-			log.Warn("could not write the model-picker cache", "err", err)
+			log.Warn("could not write the model picker", "err", err)
+		} else if cfg.AssumeFirstPartyEnabled() {
+			log.Info("model-picker settings "+string(res.State),
+				"path", res.Path, "models", res.Count, "pass_with", "claude --settings "+res.Path)
 		} else {
 			log.Info("model-picker cache "+string(res.State), "path", res.Path, "models", res.Count)
 		}
@@ -236,7 +244,7 @@ func cmdModels(args []string) error {
 	} else if len(cfg.Models) > 0 {
 		fmt.Println("No model states a context_window, so Claude Code will assume 200k for all of them.")
 	}
-	reportPickerDrift(cfg)
+	reportPickerDrift(cfg, *cfgPath)
 	for _, w := range r.DiscoveryWarnings() {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
@@ -253,7 +261,26 @@ func cmdModels(args []string) error {
 // editing the config without refreshing it leaves the picker showing a stale
 // list. That failure is silent and looks like the gateway ignoring the config,
 // which is worth one line of output to rule out.
-func reportPickerDrift(cfg *config.Config) {
+func reportPickerDrift(cfg *config.Config, cfgPath string) {
+	// With assume_first_party the rows come from a curated settings file, so
+	// the cache below is not what drifts - that file is.
+	if cfg.AssumeFirstPartyEnabled() {
+		path := picker.SettingsPath(cfgPath)
+		want := picker.OptionsFrom(pickerModels(cfg))
+		got, err := picker.ReadSettings(path)
+		switch {
+		case err != nil:
+			fmt.Fprintf(os.Stderr,
+				"\nnote: no model-picker settings at %s yet - 'ccgw serve' or\n"+
+					"      'ccgw sync-picker' writes it. Until then these models have no /model row.\n", path)
+		case len(got.ModelPicker.Options) != len(want):
+			fmt.Fprintf(os.Stderr,
+				"\nnote: the model-picker settings list %d model(s) but this config has %d.\n"+
+					"      Run 'ccgw sync-picker', then restart Claude Code fully.\n",
+				len(got.ModelPicker.Options), len(want))
+		}
+		return
+	}
 	path, err := picker.Path()
 	if err != nil {
 		return
@@ -307,6 +334,17 @@ func cmdEnv(args []string) error {
 		return err
 	}
 
+	// The flag and these two modes are mutually exclusive by construction, not
+	// by preference. 'discovery' exists to have Claude Code fetch /v1/models,
+	// which the flag switches off; 'gateway' takes the provider out of
+	// first-party entirely, so the flag is never consulted and managed settings
+	// fail on gateway pinning instead. Either combination reads as the flag
+	// silently doing nothing.
+	if cfg.AssumeFirstPartyEnabled() && *mode != "fidelity" && *mode != "baseurl" {
+		return fmt.Errorf("assume_first_party is set in the config, which turns gateway model "+
+			"discovery off - %s mode depends on it. Use -mode fidelity, or set assume_first_party: false", *mode)
+	}
+
 	base := "http://" + cfg.Listen
 	switch *mode {
 	case "discovery":
@@ -344,6 +382,10 @@ export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:?run: claude setup-token}"
 unset ANTHROPIC_API_KEY
 `, base)
 	case "fidelity", "baseurl":
+		if cfg.AssumeFirstPartyEnabled() {
+			printFirstPartyMode(base)
+			break
+		}
 		fmt.Printf(`# Fidelity mode (recommended): nothing is given up. Claude Code sends its own
 # credential (subscription OAuth token, or ANTHROPIC_API_KEY if set) straight
 # through, with its full beta set and the 1h prompt cache.
@@ -359,9 +401,102 @@ export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 		return fmt.Errorf("unknown mode %q (want fidelity, discovery or gateway)", *mode)
 	}
 	printWindowDirective(cfg)
+	printPickerRows(cfg, *cfgPath)
 	printToolSearch(cfg)
-	printClaudeWindowNote()
+	printClaudeWindowNote(cfg)
 	return nil
+}
+
+// printFirstPartyMode emits fidelity mode with EnvAssumeFirstParty set.
+//
+// It is a block of its own rather than a line added to the fidelity one
+// because the two describe opposite arrangements: fidelity mode's picker rows
+// come from the discovery cache, and this flag is precisely what stops Claude
+// Code reading it.
+func printFirstPartyMode(base string) {
+	fmt.Printf(`# Fidelity mode with assume_first_party: Claude Code is told to treat this
+# gateway's base URL as if it were api.anthropic.com. Everything else about
+# fidelity mode is unchanged - Claude Code still sends its own credential, its
+# full beta set and the 1h prompt cache.
+#
+# What the flag restores:
+#   - Remote managed settings. Behind a custom base URL Claude Code declines to
+#     fetch them at all - its internal reason is "custom_base_url" - and this is
+#     the only switch that clears it. The fetch goes straight to
+#     api.anthropic.com with your own login and never passes through the
+#     gateway, which is why no amount of proxying substitutes for it. A managed
+#     settings file installed by MDM applies either way; this is the half that
+#     arrives over the network.
+#   - The native 1M window on Claude models, so no [1m] suffix is needed.
+#   - MCP tool search, otherwise disabled purely for being behind a proxy.
+#
+# What it costs: the same switch turns gateway model discovery off, so
+# %s becomes inert - cleared below rather
+# than left looking effective - and the provider models lose the /model rows it
+# fed them, from the live fetch and from the cache alike. They come back from a
+# curated settings file instead; see the alias further down.
+#
+# The leading underscore is Anthropic's, not this project's: it is an internal
+# flag, undocumented and free to disappear in any release. If managed settings
+# stop arriving after an upgrade, check this first.
+export ANTHROPIC_BASE_URL=%s
+export %s=1
+unset %s
+`, config.EnvGatewayDiscovery,
+		base, config.EnvAssumeFirstParty, config.EnvGatewayDiscovery)
+}
+
+// printPickerRows restores the /model rows that EnvAssumeFirstParty costs.
+//
+// Two mechanisms, because they fail differently. The curated settings file
+// carries every model with its own label, but only for a Claude Code invoked
+// with --settings, which is what the alias is for. EnvCustomModelOption
+// carries one model and needs no flag, so a bare `claude` in this shell is not
+// left with nothing. Claude Code de-duplicates the overlap by model ID, and
+// the values agree because both come from the same config entry.
+func printPickerRows(cfg *config.Config, cfgPath string) {
+	if !cfg.AssumeFirstPartyEnabled() {
+		return
+	}
+	models := pickerModels(cfg)
+	fmt.Println()
+	if len(models) == 0 {
+		fmt.Printf("# No provider models are configured, so there are no rows to restore and\n")
+		fmt.Printf("# assume_first_party costs nothing. Cleared in case the shell had them set.\n")
+		fmt.Printf("unset %s %s %s\n",
+			config.EnvCustomModelOption, config.EnvCustomModelOptionName, config.EnvCustomModelOptionDescription)
+		return
+	}
+
+	settings := picker.SettingsPath(cfgPath)
+	fmt.Printf("# Gateway discovery is off, so the %d provider model(s) reach /model as curated\n", len(models))
+	fmt.Printf("# rows in a settings file instead. 'ccgw serve' and 'ccgw sync-picker' write it;\n")
+	fmt.Printf("# Claude Code only reads it when passed --settings, hence the alias. It is an\n")
+	fmt.Printf("# additional settings source, not a replacement, so your own settings.json and\n")
+	fmt.Printf("# the checkout's settings.local.json still apply. Drop the alias if you pass\n")
+	fmt.Printf("# --settings yourself, and merge modelPicker into that file instead.\n")
+	fmt.Printf("alias claude=%s\n", shellQuote("claude --settings "+shellQuote(settings)))
+
+	m := models[0]
+	fmt.Printf("#\n")
+	fmt.Printf("# And the same first model again, for a 'claude' that bypasses the alias -\n")
+	fmt.Printf("# 'command claude', a script, an editor extension. This variable needs no flag\n")
+	fmt.Printf("# but holds only one model, and Claude Code accepts its value verbatim rather\n")
+	fmt.Printf("# than checking it against a catalogue.\n")
+	fmt.Printf("export %s=%s\n", config.EnvCustomModelOption, shellQuote(m.ID))
+	if m.DisplayName != "" {
+		fmt.Printf("export %s=%s\n", config.EnvCustomModelOptionName, shellQuote(m.DisplayName))
+	}
+	if m.Description != "" {
+		fmt.Printf("export %s=%s\n", config.EnvCustomModelOptionDescription, shellQuote(m.Description))
+	}
+}
+
+// shellQuote renders s as a single-quoted shell word. This output is eval'd,
+// and display names and descriptions come from the config, so they cannot be
+// interpolated raw.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // printToolSearch re-enables on-demand loading of MCP tool schemas.
@@ -373,6 +508,19 @@ export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 // the gateway costs you.
 func printToolSearch(cfg *config.Config) {
 	fmt.Println()
+	if cfg.ToolSearchEnabled() && cfg.AssumeFirstPartyEnabled() {
+		// Redundant against the flag, which already stops Claude Code
+		// disabling tool search - but the flag is internal and may go away,
+		// and this variable is the documented lever. Keeping both means losing
+		// the flag costs managed settings, not 191k of inlined schemas too.
+		fmt.Printf("# Load MCP tool schemas on demand. assume_first_party alone is enough for\n")
+		fmt.Printf("# this - Claude Code only disables tool search behind a base URL it thinks\n")
+		fmt.Printf("# is foreign - but this is the documented lever and the flag is not, so it\n")
+		fmt.Printf("# is set explicitly. Managed settings can still override it; exporting\n")
+		fmt.Printf("# %s=force after the eval wins.\n", config.EnvToolSearch)
+		fmt.Printf("export %s=true\n", config.EnvToolSearch)
+		return
+	}
 	if !cfg.ToolSearchEnabled() {
 		fmt.Printf("# enable_tool_search is off in the config, so MCP tool schemas are inlined\n")
 		fmt.Printf("# into every request. Cleared here in case the shell already had it set.\n")
@@ -395,7 +543,16 @@ func printToolSearch(cfg *config.Config) {
 // breaking Claude models, and the fix is not discoverable, so say both.
 //
 // Everything printed is a comment: this output is eval'd.
-func printClaudeWindowNote() {
+func printClaudeWindowNote(cfg *config.Config) {
+	if cfg.AssumeFirstPartyEnabled() {
+		fmt.Print(`
+# Claude models keep their native 1M window here. The 200k fallback applies
+# only behind a base URL Claude Code considers foreign, and the flag above makes
+# it consider this one its own, so /model sonnet reads as 1.0M and the [1m]
+# suffix is not needed. It still works if you prefer to be explicit.
+`)
+		return
+	}
 	fmt.Print(`
 # Claude models: pointing ANTHROPIC_BASE_URL at anything other than Anthropic's
 # own host costs them their native 1M window. Claude Code keeps the catalogue's
@@ -484,7 +641,17 @@ func pickerModels(cfg *config.Config) []picker.Model {
 // same way.
 func baseURL(cfg *config.Config) string { return "http://" + cfg.Listen }
 
-func syncPicker(cfg *config.Config) (picker.Result, error) {
+// syncPicker makes the /model picker show the configured models, by whichever
+// mechanism this arrangement leaves available.
+//
+// With assume_first_party set, Claude Code does not read the discovery cache at
+// all - the flag turns discovery off - so the rows have to come from a
+// modelPicker block in a --settings file instead. Writing the cache anyway
+// would report success for a file nothing reads.
+func syncPicker(cfg *config.Config, cfgPath string) (picker.Result, error) {
+	if cfg.AssumeFirstPartyEnabled() {
+		return picker.SyncSettings(picker.SettingsPath(cfgPath), picker.OptionsFrom(pickerModels(cfg)))
+	}
 	path, err := picker.Path()
 	if err != nil {
 		return picker.Result{}, err
@@ -500,28 +667,59 @@ func cmdSyncPicker(args []string) error {
 		return err
 	}
 
-	if *remove {
-		path, err := picker.Path()
-		if err != nil {
-			return err
-		}
-		res, err := picker.Remove(path)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("%s %s\n", res.State, res.Path)
-		return nil
-	}
-
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {
 		return err
 	}
-	res, err := syncPicker(cfg)
+
+	if *remove {
+		// Remove whichever file this arrangement wrote, and the other one too:
+		// the usual reason to run this is that the gateway is going away, and
+		// a config edited since the last sync should not leave one behind.
+		var results []picker.Result
+		if res, err := picker.RemoveSettings(picker.SettingsPath(*cfgPath)); err != nil {
+			return err
+		} else if res.State != picker.StateAbsent {
+			results = append(results, res)
+		}
+		if path, err := picker.Path(); err == nil {
+			if res, err := picker.Remove(path); err != nil {
+				return err
+			} else if res.State != picker.StateAbsent {
+				results = append(results, res)
+			}
+		}
+		if len(results) == 0 {
+			fmt.Println("absent (nothing to remove)")
+			return nil
+		}
+		for _, res := range results {
+			fmt.Printf("%s %s\n", res.State, res.Path)
+		}
+		return nil
+	}
+
+	res, err := syncPicker(cfg, *cfgPath)
 	if err != nil {
 		return err
 	}
+	if cfg.AssumeFirstPartyEnabled() {
+		fmt.Printf("%s %s (%d models)\n", res.State, res.Path, res.Count)
+		fmt.Printf("\nassume_first_party is on, so these rows reach /model as curated settings\n")
+		fmt.Printf("rather than through gateway discovery, which the flag turns off. Claude Code\n")
+		fmt.Printf("has to be told about the file:\n\n")
+		fmt.Printf("    claude --settings %s\n\n", res.Path)
+		fmt.Printf("'ccgw env' emits an alias that does that. It is read at startup only, so\n")
+		fmt.Printf("restart Claude Code fully after changing the model list.\n")
+		return nil
+	}
 	fmt.Printf("%s %s (%d models, baseUrl %s)\n", res.State, res.Path, res.Count, baseURL(cfg))
+	if cfg.AssumeFirstPartyEnabled() {
+		fmt.Printf("\nassume_first_party is on in the config, which turns gateway model discovery\n")
+		fmt.Printf("off - so Claude Code will not read this cache. The file is written anyway, to\n")
+		fmt.Printf("be there if you set assume_first_party: false again.\n")
+		return nil
+	}
 	fmt.Println("\nClaude Code reads this at startup. It needs CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1")
 	fmt.Println("and an ANTHROPIC_BASE_URL exactly equal to the baseUrl above, and it only")
 	fmt.Println("re-reads on a full restart - /reload-plugins does not refresh the picker.")
@@ -639,6 +837,22 @@ anthropic:
   # is header-only. oauth-2025-04-20 is added automatically when a
   # subscription token is forwarded.
   add_betas: []
+
+# Ask Claude Code to treat this gateway's base URL as api.anthropic.com's own.
+#
+# On: remote managed settings are fetched again - behind a custom base URL
+# Claude Code refuses to, so an org that delivers settings over the network
+# stops reaching you - Claude models keep their native 1M window, and MCP tool
+# search is not disabled for being behind a proxy.
+#
+# The cost is not the models - 'ccgw sync-picker' writes them to a curated
+# settings file instead, and 'ccgw env' emits the alias that passes it to
+# Claude Code - it is that launching plain 'claude' no longer shows all of
+# them, because gateway discovery is what this switch turns off. Only
+# 'ccgw env -mode fidelity' accepts it.
+#
+# It is an internal, undocumented Claude Code flag and may stop working.
+assume_first_party: false
 
 # Claude Code's model discovery drops any ID that does not contain "claude" or
 # "anthropic", so non-Anthropic models are advertised under this prefix and the

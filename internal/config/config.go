@@ -47,6 +47,15 @@ type Config struct {
 	// forwards tool_reference blocks — and then inlines every MCP tool schema
 	// instead of loading them on demand. Unset means on; see ToolSearchEnabled.
 	EnableToolSearch *bool `yaml:"enable_tool_search"`
+	// AssumeFirstParty exports EnvAssumeFirstParty from 'ccgw env', which makes
+	// Claude Code treat this gateway's base URL as Anthropic's own: remote
+	// managed settings are fetched again, Claude models keep their native 1M
+	// window, and tool search stops being disabled for being behind a proxy.
+	//
+	// The cost is the /model picker rows for the provider models, because the
+	// same switch turns gateway model discovery off. Off by default; see
+	// AssumeFirstPartyEnabled.
+	AssumeFirstParty *bool `yaml:"assume_first_party"`
 	// Anthropic configures the default passthrough route.
 	Anthropic AnthropicConfig `yaml:"anthropic"`
 	// Providers are the non-Anthropic backends.
