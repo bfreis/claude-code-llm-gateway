@@ -297,7 +297,7 @@ func TestTheFirstPartyEnvIsShellSafe(t *testing.T) {
 	// than asserting on the rendering: what matters is what eval does with it.
 	out := firstPartyEnv(t, "  - id: a\n    provider: codex\n"+
 		"    display_name: \"OpenAI's $HOME; echo pwned\"\n")
-	script := "set -euo pipefail\n" + out + "\nprintf '%s' \"$ANTHROPIC_CUSTOM_MODEL_OPTION_NAME\"\n"
+	script := "set -eu\n" + out + "\nprintf '%s' \"$ANTHROPIC_CUSTOM_MODEL_OPTION_NAME\"\n"
 	got, err := exec.Command("/bin/sh", "-c", script).Output()
 	if err != nil {
 		t.Fatalf("eval of 'ccgw env' failed: %v\n%s", err, out)
