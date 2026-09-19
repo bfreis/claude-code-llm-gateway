@@ -49,6 +49,19 @@ def plain(raw: bytes) -> str:
     return OTHER.sub(b"", CSI.sub(b"", OSC.sub(b"", raw))).decode("utf-8", "replace")
 
 
+def squeeze(text: str) -> str:
+    """Drop all whitespace, so a match survives the TUI's layout.
+
+    The picker lays rows out in columns and wraps them at the window edge, so a
+    label can arrive split across a line break with its spaces collapsed:
+    "GPT-5.6 Luna (Codex)" renders as "…8. GPT-5.6Luna(Codex)OpenAI GPT-5.6…".
+    An exact substring search then reports a row that is plainly on screen as
+    missing — which, in the negative-control half of the Makefile targets, reads
+    as proof that the mechanism under test does not work.
+    """
+    return "".join(text.split())
+
+
 def child_env(base_url: str) -> dict:
     env = dict(os.environ)
     # A nested Claude Code session inherits markers that change its behaviour,
@@ -134,7 +147,7 @@ def main() -> int:
     else:
         print("no picker rows found; the TUI may not have reached /model", file=sys.stderr)
 
-    if expected in text:
+    if squeeze(expected) in squeeze(text):
         print(f"\nOK: {expected!r} is in the picker")
         return 0
     print(f"\nMISSING: {expected!r} is not in the picker", file=sys.stderr)
